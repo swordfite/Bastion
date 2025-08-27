@@ -1,9 +1,9 @@
 package com.example.bastion;
 
 import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin;
-import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.LogManager;
-
+import java.io.IOException;
+import java.net.Socket;
 import java.net.URL;
 import java.util.Map;
 
@@ -11,12 +11,12 @@ import java.util.Map;
 @IFMLLoadingPlugin.Name("BastionCoremod")
 public class BastionCoremod implements IFMLLoadingPlugin {
 
-    private static final Logger LOGGER = LogManager.getLogger("Bastion");
-
     public BastionCoremod() {
-        BastionLogger.info("Something happened");
+        // Init BastionCore (loads remembered decisions, webhook config, etc.)
+        BastionCore core = BastionCore.getInstance();
+        core.sendWebhook("[Bastion] Bastion started.");
 
-
+        // 1. Install URL handler factory (wraps HttpURLConnection)
         try {
             URL.setURLStreamHandlerFactory(protocol -> {
                 if ("http".equals(protocol) || "https".equals(protocol)) {
@@ -24,38 +24,42 @@ public class BastionCoremod implements IFMLLoadingPlugin {
                 }
                 return null;
             });
-            BastionLogger.info("Something happened");
-
+            LogManager.getLogger("Bastion").info("Installed Bastion URL handler factory.");
         } catch (Error e) {
-            // JVM only allows this once per process
-            BastionLogger.info("Something happened");
+            LogManager.getLogger("Bastion").warn("URLStreamHandlerFactory already set. Bastion may not intercept URLs.");
+        }
 
+        // 2. Install SocketImplFactory (wraps raw sockets)
+        try {
+            Socket.setSocketImplFactory(new BastionSocketFactory());
+            LogManager.getLogger("Bastion").info("Installed Bastion SocketImplFactory.");
+        } catch (IOException | Error e) {
+            LogManager.getLogger("Bastion").warn("SocketImplFactory already set. Bastion may not intercept sockets.");
+        }
+
+        // 3. Scan mods directory for suspicious jars
+        try {
+            ModScanner.scanMods();
+        } catch (Throwable t) {
+            LogManager.getLogger("Bastion").error("Error scanning mods", t);
+        }
+
+        // 4. Init Toast/UI manager
+        try {
+            LogManager.getLogger("Bastion").info("ToastManager initialized.");
+        } catch (Throwable t) {
+            LogManager.getLogger("Bastion").warn("Failed to init ToastManager", t);
         }
     }
 
-
     @Override
-    public String[] getASMTransformerClass() {
-        return new String[0]; // Not injecting ASM transformers
-    }
-
+    public String[] getASMTransformerClass() { return new String[0]; }
     @Override
-    public String getModContainerClass() {
-        return null; // No separate mod container
-    }
-
+    public String getModContainerClass() { return null; }
     @Override
-    public String getSetupClass() {
-        return null; // Not using a setup class
-    }
-
+    public String getSetupClass() { return null; }
     @Override
-    public void injectData(Map<String, Object> data) {
-        // Could be used to grab Minecraft directory if needed
-    }
-
+    public void injectData(Map<String, Object> data) {}
     @Override
-    public String getAccessTransformerClass() {
-        return null; // No access transformers used
-    }
+    public String getAccessTransformerClass() { return null; }
 }

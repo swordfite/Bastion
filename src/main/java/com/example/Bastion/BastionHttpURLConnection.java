@@ -1,90 +1,114 @@
 package com.example.bastion;
 
-import com.example.bastion.ui.GuiSessionPrompt;
-import com.example.bastion.ui.ToastManager;
-import net.minecraft.client.Minecraft;
-
-import java.io.IOException;
+import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 
-/**
- * Wrapper around HttpURLConnection with Bastion interception logic.
- */
 public class BastionHttpURLConnection extends HttpURLConnection {
+
     private final HttpURLConnection delegate;
-
-    // pending approvals map: modName -> list of blocked connections
-    private static final Map<String, List<BastionHttpURLConnection>> pending = new ConcurrentHashMap<>();
-
     private final String modName;
 
-    protected BastionHttpURLConnection(HttpURLConnection delegate, URL url) {
-        super(url);
+    protected BastionHttpURLConnection(HttpURLConnection delegate, String modName) {
+        super(delegate.getURL());
         this.delegate = delegate;
+        this.modName = modName;
+    }
 
-        // TODO: replace with real mod detection, right now just UNKNOWN
-        this.modName = "UNKNOWN_MOD";
+    public static BastionHttpURLConnection wrap(HttpURLConnection conn) {
+        return new BastionHttpURLConnection(conn, identifyCaller());
     }
 
     @Override
     public void connect() throws IOException {
-        String target = url.toString();
-
-        if (target.contains("discord.com/api/webhooks")) {
-            BastionCore core = BastionCore.getInstance();
-
-            // If denied → hard block
-            if (core.isDenied(modName)) {
-                throw new IOException("Bastion: Denied webhook request " + target);
-            }
-
-            // If not yet approved → queue + prompt
-            if (!core.isApproved(modName)) {
-                pending.computeIfAbsent(modName, k -> new ArrayList<>()).add(this);
-
-                Minecraft.getMinecraft().addScheduledTask(() -> {
-                    Minecraft.getMinecraft().displayGuiScreen(new GuiSessionPrompt(modName));
-                    ToastManager.addToast("[Bastion] Suspended webhook request from " + modName);
-                });
-
-                // Prevent immediate network call
-                throw new IOException("Bastion: Webhook request frozen pending approval");
-            }
-        }
-
-        // Normal flow
+        enforceDecision("HTTP → connect");
         delegate.connect();
     }
 
-    /**
-     * Called from GuiSessionPrompt when user clicks Allow/Deny.
-     */
-    public static void resolvePending(String modName, boolean approved) {
-        BastionCore core = BastionCore.getInstance();
+    @Override
+    public OutputStream getOutputStream() throws IOException {
+        enforceDecision("HTTP → output");
+        return new InterceptingOutputStream(delegate.getOutputStream(), modName, delegate.getURL());
+    }
 
-        if (approved) {
-            core.addApproved(modName);
-            List<BastionHttpURLConnection> list = pending.remove(modName);
-            if (list != null) {
-                for (BastionHttpURLConnection conn : list) {
-                    try {
-                        System.out.println("[Bastion] Releasing queued webhook: " + conn.url);
-                        conn.delegate.connect(); // retry underlying connection
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
+    @Override
+    public int getResponseCode() throws IOException {
+        enforceDecision("HTTP → responseCode");
+        return delegate.getResponseCode();
+    }
+
+    @Override public void disconnect() { delegate.disconnect(); }
+    @Override public boolean usingProxy() { return delegate.usingProxy(); }
+
+    private void enforceDecision(String reason) throws IOException {
+        BastionCore core = BastionCore.getInstance();
+        URL url = delegate.getURL();
+        String hostKey = BastionCore.normalizeHostPort(
+                url.getHost(),
+                url.getPort() > 0 ? url.getPort() : url.getDefaultPort()
+        );
+
+        // Request approval asynchronously
+        CompletableFuture<Boolean> future =
+                core.requestApproval(modName, hostKey, url.toString(), reason);
+
+        try {
+            boolean allowed = core.awaitApproval(modName, hostKey, url.toString(), future);
+            if (!allowed) {
+                throw new IOException("[Bastion] Blocked → " + modName + " → " + url);
             }
-        } else {
-            core.addBlocked(modName);
-            pending.remove(modName);
+        } catch (Exception e) {
+            throw new IOException("[Bastion] Decision error → " + modName + " → " + url, e);
         }
     }
 
-    // Forward everything else
-    @Override public void disconnect() { delegate.disconnect(); }
-    @Override public boolean usingProxy() { return delegate.usingProxy(); }
+
+    public static class InterceptingOutputStream extends FilterOutputStream {
+        private final String modName;
+        private final URL url;
+
+        InterceptingOutputStream(OutputStream delegate, String modName, URL url) {
+            super(delegate);
+            this.modName = modName;
+            this.url = url;
+        }
+
+        private void enforce(String action) throws IOException {
+            BastionCore core = BastionCore.getInstance();
+            String hostKey = BastionCore.normalizeHostPort(
+                    url.getHost(),
+                    url.getPort() > 0 ? url.getPort() : url.getDefaultPort()
+            );
+            core.enforceDecision(modName, hostKey, url.toString(), action);
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            enforce("HTTP → write");
+            super.write(b);
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            enforce("HTTP → write");
+            super.write(b, off, len);
+        }
+
+        @Override
+        public void flush() throws IOException {
+            enforce("HTTP → flush");
+            super.flush();
+        }
+    }
+
+    public static String identifyCaller() {
+        for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
+            String cls = el.getClassName();
+            if (cls.startsWith("com.example.bastion")) continue;
+            if (cls.startsWith("java.") || cls.startsWith("sun.") || cls.startsWith("javax.")) continue;
+            return ModCaller.resolveModName(cls);
+        }
+        return "UnknownMod (UnknownFile.jar)";
+    }
 }

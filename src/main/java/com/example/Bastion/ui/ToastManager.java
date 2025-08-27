@@ -3,7 +3,6 @@ package com.example.bastion.ui;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.renderer.GlStateManager;
-import net.minecraft.util.ResourceLocation;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -11,18 +10,21 @@ import java.util.List;
 
 public class ToastManager {
 
-    private static final ResourceLocation DIRT_BG = new ResourceLocation("textures/blocks/dirt.png");
     private static final List<Toast> toasts = new ArrayList<>();
 
     public static void addToast(String message) {
-        toasts.add(new Toast(message));
+        addToast(message, 0xFFFF55); // default yellow text
+    }
+
+    public static void addToast(String message, int color) {
+        toasts.add(new Toast(message, color));
     }
 
     public static void render(Minecraft mc) {
         if (toasts.isEmpty()) return;
 
         ScaledResolution sr = new ScaledResolution(mc);
-        int baseX = sr.getScaledWidth() - 170;
+        int baseX = sr.getScaledWidth() - 220; // wide enough for wrapped text
         int y = 10;
 
         Iterator<Toast> it = toasts.iterator();
@@ -33,18 +35,21 @@ public class ToastManager {
                 continue;
             }
             toast.draw(mc, baseX, y);
-            y += 42;
+            y += toast.getHeight() + 10; // dynamic stacking
         }
     }
 
+    // === Inner toast class ===
     private static class Toast {
         private final String message;
+        private final int color;
         private final long start;
         private final long duration = 15000; // visible
-        private final long fadeTime = 1000; // animation after
+        private final long fadeTime = 1000;  // fade out
 
-        private Toast(String message) {
+        private Toast(String message, int color) {
             this.message = message;
+            this.color = color;
             this.start = System.currentTimeMillis();
         }
 
@@ -52,35 +57,74 @@ public class ToastManager {
             return System.currentTimeMillis() - start > duration + fadeTime;
         }
 
+        private int getHeight() {
+            Minecraft mc = Minecraft.getMinecraft();
+            int maxWidth = 200;
+            List<String> lines = mc.fontRendererObj.listFormattedStringToWidth(message, maxWidth);
+            return 30 + (lines.size() * mc.fontRendererObj.FONT_HEIGHT);
+        }
+
         private void draw(Minecraft mc, int x, int y) {
             long elapsed = System.currentTimeMillis() - start;
             float alpha = 1.0f;
             int yOffset = 0;
 
-            // Fade/retract when in the last second
             if (elapsed > duration) {
                 float progress = (float)(elapsed - duration) / fadeTime;
                 progress = Math.min(progress, 1.0f);
-
-                alpha = 1.0f - progress;       // fade out
-                yOffset = -(int)(progress * 20); // slide up 20px
+                alpha = 1.0f - progress;
+                yOffset = -(int)(progress * 20);
             }
 
             GlStateManager.enableBlend();
-            GlStateManager.color(1f, 1f, 1f, alpha);
+            GlStateManager.disableTexture2D();
 
-            // background
-            mc.getTextureManager().bindTexture(DIRT_BG);
-            mc.ingameGUI.drawTexturedModalRect(x, y + yOffset, 0, 0, 160, 32);
+            // === Background ===
+            int maxWidth = 200;
+            List<String> lines = mc.fontRendererObj.listFormattedStringToWidth(message, maxWidth);
+            int textHeight = lines.size() * mc.fontRendererObj.FONT_HEIGHT;
+            int toastHeight = 20 + textHeight;
+            int toastWidth = maxWidth + 12;
 
-            // title
+            // background rectangle (semi-transparent black)
+            drawRect(x, y + yOffset, x + toastWidth, y + toastHeight + yOffset, 0xAA000000);
+
+            GlStateManager.enableTexture2D();
+
+            // title always gold
             mc.fontRendererObj.drawStringWithShadow("§6[Bastion]", x + 6, y + 6 + yOffset, 0xFFD700);
 
-            // message
-            mc.fontRendererObj.drawSplitString(message, x + 6, y + 18 + yOffset, 148, 0xFFFF55);
+            // message lines with toast color
+            int lineY = y + 20 + yOffset;
+            for (String line : lines) {
+                mc.fontRendererObj.drawString(line, x + 6, lineY, color);
+                lineY += mc.fontRendererObj.FONT_HEIGHT;
+            }
 
             GlStateManager.disableBlend();
-            GlStateManager.color(1f, 1f, 1f, 1f); // reset alpha
+            GlStateManager.color(1f, 1f, 1f, 1f);
+        }
+
+        // Gui.drawRect clone
+        private void drawRect(int left, int top, int right, int bottom, int color) {
+            int j;
+            if (left < right) { j = left; left = right; right = j; }
+            if (top < bottom) { j = top; top = bottom; bottom = j; }
+
+            float a = (float)(color >> 24 & 255) / 255.0F;
+            float r = (float)(color >> 16 & 255) / 255.0F;
+            float g = (float)(color >> 8 & 255) / 255.0F;
+            float b = (float)(color & 255) / 255.0F;
+
+            GlStateManager.color(r, g, b, a);
+            net.minecraft.client.renderer.Tessellator tess = net.minecraft.client.renderer.Tessellator.getInstance();
+            net.minecraft.client.renderer.WorldRenderer wr = tess.getWorldRenderer();
+            wr.begin(7, net.minecraft.client.renderer.vertex.DefaultVertexFormats.POSITION);
+            wr.pos(left, bottom, 0.0D).endVertex();
+            wr.pos(right, bottom, 0.0D).endVertex();
+            wr.pos(right, top, 0.0D).endVertex();
+            wr.pos(left, top, 0.0D).endVertex();
+            tess.draw();
         }
     }
 }
